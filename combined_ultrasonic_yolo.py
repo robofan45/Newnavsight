@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Combined HC-SR04 Ultrasonic Sensor and YOLOv8 Object Detection
-For Raspberry Pi 5 - Runs both systems simultaneously
+CORRECTED VERSION - Fixed syntax errors
 """
 
 import lgpio
@@ -41,31 +41,79 @@ ECHO_PIN = 24
 class AlertType(Enum):
     """Types of alerts that can be generated"""
     ULTRASONIC = 1
-    YOLO = 2
+    YOLO_BEEP = 2
+    YOLO_SPEECH = 3
 
 @dataclass
 class Alert:
     """Alert data structure"""
     alert_type: AlertType
-    message: str
+    message: str = ""
     frequency: int = 1000
     duration: float = 0.1
-    priority: int = 1  # Higher number = higher priority
+    priority: int = 1
 
 class AudioController:
-    """Unified audio controller for both systems"""
+    """Unified audio controller with fixed YOLO support"""
     
     def __init__(self):
         self.audio_method = None
+        self.tts_method = None
         self.bluetooth_connected = False
         self.audio_queue = queue.PriorityQueue()
         self.audio_thread = None
         self.running = False
         self.last_yolo_audio = 0
-        self.yolo_cooldown = 3.0  # Seconds between YOLO announcements
+        self.yolo_cooldown = 2.0
+        self.yolo_audio_enabled = True  # Instance variable instead of global
         self.setup_audio()
         self.start_audio_processor()
         
+    def setup_audio(self):
+        """Setup and detect best audio method"""
+        print("Setting up audio system...")
+        
+        # Ensure PulseAudio is running
+        self.ensure_pulseaudio()
+        
+        # Check Bluetooth connection
+        self.bluetooth_connected = self.check_bluetooth_connection()
+        if self.bluetooth_connected:
+            self.setup_bluetooth()
+        
+        # Test beep methods
+        beep_methods = [
+            ("pulse", self.test_pulseaudio),
+            ("sox", self.test_sox),
+            ("alsa", self.test_alsa)
+        ]
+        
+        for name, test_func in beep_methods:
+            print(f"Testing {name} for beeps...")
+            if test_func():
+                self.audio_method = name
+                print(f"✔ Using {name} for beeps")
+                break
+        
+        # Test TTS methods separately
+        tts_methods = [
+            ("espeak", self.test_espeak),
+            ("pico2wave", self.test_pico2wave),
+            ("festival", self.test_festival)
+        ]
+        
+        for name, test_func in tts_methods:
+            print(f"Testing {name} for speech...")
+            if test_func():
+                self.tts_method = name
+                print(f"✔ Using {name} for text-to-speech")
+                break
+        
+        if not self.audio_method:
+            print("⚠ No beep method available")
+        if not self.tts_method:
+            print("⚠ No TTS method available - will use beeps for YOLO")
+    
     def check_bluetooth_connection(self):
         """Check if Bluetooth device is connected"""
         try:
@@ -79,36 +127,6 @@ class AudioController:
             return False
         except:
             return False
-    
-    def setup_audio(self):
-        """Setup and detect best audio method"""
-        print("Setting up audio system...")
-        
-        # Ensure PulseAudio is running
-        self.ensure_pulseaudio()
-        
-        # Check Bluetooth connection
-        self.bluetooth_connected = self.check_bluetooth_connection()
-        if self.bluetooth_connected:
-            self.setup_bluetooth()
-        
-        # Test different audio methods
-        methods = [
-            ("pulse", self.test_pulseaudio),
-            ("sox", self.test_sox),
-            ("alsa", self.test_alsa),
-            ("espeak", self.test_espeak)
-        ]
-        
-        for name, test_func in methods:
-            print(f"Testing {name}...")
-            if test_func():
-                self.audio_method = name
-                print(f"✔ Using {name} for audio")
-                break
-        
-        if not self.audio_method:
-            print("⚠ No audio method available - will use visual alerts only")
     
     def ensure_pulseaudio(self):
         """Ensure PulseAudio is running"""
@@ -125,7 +143,7 @@ class AudioController:
             pass
     
     def setup_bluetooth(self):
-        """Ensure Bluetooth audio is properly configured"""
+        """Setup Bluetooth audio"""
         try:
             result = subprocess.run(
                 ["pactl", "list", "short", "sinks"],
@@ -144,15 +162,10 @@ class AudioController:
                     timeout=2
                 )
                 print(f"✔ Bluetooth audio sink set: {bluetooth_sink}")
-                subprocess.run(["amixer", "set", "Master", "80%"], 
-                             stderr=subprocess.DEVNULL)
                 return True
-            else:
-                print("⚠ Bluetooth connected but no audio sink found")
-                return False
-        except Exception as e:
-            print(f"⚠ Bluetooth setup error: {e}")
-            return False
+        except:
+            pass
+        return False
     
     def test_pulseaudio(self):
         """Test PulseAudio"""
@@ -161,7 +174,27 @@ class AudioController:
                 ["which", "paplay"],
                 capture_output=True, timeout=1
             )
-            return result.returncode == 0
+            if result.returncode == 0:
+                return self.test_pulse_beep()
+            return False
+        except:
+            return False
+    
+    def test_pulse_beep(self):
+        """Test PulseAudio beep generation"""
+        try:
+            rate = 22050
+            frequency = 1000
+            duration = 0.1
+            samples = np.sin(2 * np.pi * frequency * np.arange(rate * duration) / rate)
+            data = (samples * 32767).astype(np.int16).tobytes()
+            
+            proc = subprocess.Popen(
+                ['paplay', '--raw', '--rate=22050', '--format=s16le', '--channels=1'],
+                stdin=subprocess.PIPE, stderr=subprocess.DEVNULL
+            )
+            proc.communicate(input=data, timeout=1)
+            return proc.returncode == 0
         except:
             return False
     
@@ -172,9 +205,15 @@ class AudioController:
                 ["which", "play"],
                 capture_output=True, timeout=1
             )
-            return result.returncode == 0
+            if result.returncode == 0:
+                subprocess.run(
+                    ["play", "-n", "-c1", "synth", "0.01", "sine", "1000", "vol", "0.1"],
+                    stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=1
+                )
+                return True
         except:
-            return False
+            pass
+        return False
     
     def test_alsa(self):
         """Test ALSA"""
@@ -188,10 +227,38 @@ class AudioController:
             return False
     
     def test_espeak(self):
-        """Test espeak for TTS"""
+        """Test espeak TTS"""
         try:
             result = subprocess.run(
                 ["which", "espeak"],
+                capture_output=True, timeout=1
+            )
+            if result.returncode == 0:
+                subprocess.run(
+                    ["espeak", "-a", "0", "test"],
+                    stderr=subprocess.DEVNULL, timeout=1
+                )
+                return True
+        except:
+            pass
+        return False
+    
+    def test_pico2wave(self):
+        """Test pico2wave TTS"""
+        try:
+            result = subprocess.run(
+                ["which", "pico2wave"],
+                capture_output=True, timeout=1
+            )
+            return result.returncode == 0
+        except:
+            return False
+    
+    def test_festival(self):
+        """Test festival TTS"""
+        try:
+            result = subprocess.run(
+                ["which", "festival"],
                 capture_output=True, timeout=1
             )
             return result.returncode == 0
@@ -209,12 +276,13 @@ class AudioController:
         """Process audio alerts from queue"""
         while self.running:
             try:
-                # Get alert with timeout to allow checking running flag
                 priority, alert = self.audio_queue.get(timeout=0.1)
                 
                 if alert.alert_type == AlertType.ULTRASONIC:
                     self._play_beep_internal(alert.frequency, alert.duration)
-                elif alert.alert_type == AlertType.YOLO:
+                elif alert.alert_type == AlertType.YOLO_BEEP:
+                    self._play_yolo_beep_pattern()
+                elif alert.alert_type == AlertType.YOLO_SPEECH:
                     self._speak_text(alert.message)
                     
             except queue.Empty:
@@ -223,58 +291,98 @@ class AudioController:
                 print(f"Audio processing error: {e}")
     
     def _play_beep_internal(self, frequency, duration):
-        """Internal beep playing method"""
+        """Play a beep using available method"""
         if not self.audio_method:
             return
             
         try:
             if self.audio_method == "pulse":
-                rate = 44100
+                rate = 22050
                 samples = np.sin(2 * np.pi * frequency * np.arange(rate * duration) / rate)
+                fade_samples = int(rate * 0.01)
+                fade_in = np.linspace(0, 1, fade_samples)
+                fade_out = np.linspace(1, 0, fade_samples)
+                samples[:fade_samples] *= fade_in
+                samples[-fade_samples:] *= fade_out
                 data = (samples * 32767).astype(np.int16).tobytes()
                 
                 proc = subprocess.Popen(
-                    ['paplay', '--raw', '--rate=44100', '--format=s16le', '--channels=1'],
+                    ['paplay', '--raw', '--rate=22050', '--format=s16le', '--channels=1'],
                     stdin=subprocess.PIPE, stderr=subprocess.DEVNULL
                 )
-                proc.communicate(input=data, timeout=1)
+                proc.communicate(input=data, timeout=duration+0.5)
                 
             elif self.audio_method == "sox":
                 subprocess.run([
                     "play", "-n", "-c1", "synth", str(duration), 
                     "sine", str(frequency), "vol", "0.5"
-                ], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=2)
+                ], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=duration+0.5)
                 
             elif self.audio_method == "alsa":
-                # Create temporary WAV file
                 wav_file = f"/tmp/beep_{frequency}_{int(time.time()*1000)}.wav"
                 if self.create_beep_wav(wav_file, frequency, duration):
                     subprocess.run(
                         ["aplay", "-q", wav_file], 
-                        stderr=subprocess.DEVNULL, timeout=2
+                        stderr=subprocess.DEVNULL, timeout=duration+0.5
                     )
                     try:
                         os.remove(wav_file)
                     except:
                         pass
         except Exception as e:
-            print(f"Error playing beep: {e}")
+            print(f"Beep error: {e}")
+    
+    def _play_yolo_beep_pattern(self):
+        """Play a distinctive double-beep for YOLO detection"""
+        try:
+            self._play_beep_internal(1200, 0.1)
+            time.sleep(0.05)
+            self._play_beep_internal(1500, 0.1)
+        except:
+            pass
     
     def _speak_text(self, text):
-        """Speak text using espeak"""
-        if self.audio_method == "espeak":
-            try:
+        """Speak text using available TTS method"""
+        try:
+            if self.tts_method == "espeak":
                 subprocess.run(
-                    ["espeak", "-v", "en", text], 
-                    capture_output=True, timeout=3
+                    ["espeak", "-v", "en", "-s", "150", "-a", "100", text], 
+                    stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=3
                 )
-            except:
-                print(f"TTS: {text}")
-        else:
-            print(f"Detection: {text}")
+            elif self.tts_method == "pico2wave":
+                wav_file = f"/tmp/speech_{int(time.time()*1000)}.wav"
+                subprocess.run(
+                    ["pico2wave", "-w", wav_file, text],
+                    stderr=subprocess.DEVNULL, timeout=2
+                )
+                subprocess.run(
+                    ["aplay", "-q", wav_file],
+                    stderr=subprocess.DEVNULL, timeout=3
+                )
+                try:
+                    os.remove(wav_file)
+                except:
+                    pass
+            elif self.tts_method == "festival":
+                echo = subprocess.Popen(
+                    ["echo", text],
+                    stdout=subprocess.PIPE
+                )
+                subprocess.run(
+                    ["festival", "--tts"],
+                    stdin=echo.stdout,
+                    stderr=subprocess.DEVNULL,
+                    timeout=3
+                )
+            else:
+                print(f"Detection: {text}")
+                self._play_yolo_beep_pattern()
+        except Exception as e:
+            print(f"TTS failed ({e}), using beep")
+            self._play_yolo_beep_pattern()
     
     def create_beep_wav(self, filename, frequency=1000, duration=0.1, volume=0.5):
-        """Create a WAV file with a beep sound"""
+        """Create a WAV file with a beep"""
         try:
             sample_rate = 44100
             num_samples = int(sample_rate * duration)
@@ -297,25 +405,55 @@ class AudioController:
         """Add ultrasonic beep to queue"""
         alert = Alert(
             alert_type=AlertType.ULTRASONIC,
-            message="",
             frequency=frequency,
             duration=duration,
             priority=priority
         )
-        # Use negative priority for queue (lower number = higher priority)
         self.audio_queue.put((-priority, alert))
     
-    def add_yolo_alert(self, message, priority=3):
-        """Add YOLO detection announcement to queue"""
+    def add_yolo_alert(self, message, force=False):
+        """Add YOLO detection alert with improved handling"""
+        if not self.yolo_audio_enabled:
+            return
+            
         current_time = time.time()
-        if current_time - self.last_yolo_audio >= self.yolo_cooldown:
-            alert = Alert(
-                alert_type=AlertType.YOLO,
-                message=message,
-                priority=priority
-            )
-            self.audio_queue.put((-priority, alert))
+        if force or (current_time - self.last_yolo_audio >= self.yolo_cooldown):
+            if self.tts_method:
+                alert = Alert(
+                    alert_type=AlertType.YOLO_SPEECH,
+                    message=message,
+                    priority=3
+                )
+            else:
+                alert = Alert(
+                    alert_type=AlertType.YOLO_BEEP,
+                    message=message,
+                    priority=3
+                )
+            
+            self.audio_queue.put((-alert.priority, alert))
             self.last_yolo_audio = current_time
+            
+            print(f"\n🎯 YOLO: {message}")
+    
+    def toggle_yolo_audio(self):
+        """Toggle YOLO audio on/off"""
+        self.yolo_audio_enabled = not self.yolo_audio_enabled
+        return self.yolo_audio_enabled
+    
+    def test_audio_system(self):
+        """Test the audio system with sample alerts"""
+        print("\nTesting audio system...")
+        
+        print("Testing ultrasonic beep...")
+        self.add_ultrasonic_alert(1000, 0.2, priority=5)
+        time.sleep(0.5)
+        
+        print("Testing YOLO detection alert...")
+        self.add_yolo_alert("Test detection: person", force=True)
+        time.sleep(2)
+        
+        print("Audio test complete!\n")
     
     def cleanup(self):
         """Clean up audio resources"""
@@ -335,7 +473,6 @@ class UltrasonicSensor:
         self.current_distance = None
         self.audio_controller = None
         
-        # Try different chip numbers for Pi 5
         for chip_num in [4, 0]:
             try:
                 self.chip = lgpio.gpiochip_open(chip_num)
@@ -347,7 +484,6 @@ class UltrasonicSensor:
         if self.chip is None:
             raise Exception("Failed to open GPIO chip for ultrasonic sensor")
         
-        # Setup pins
         lgpio.gpio_claim_output(self.chip, self.trig)
         lgpio.gpio_claim_input(self.chip, self.echo)
         lgpio.gpio_write(self.chip, self.trig, 0)
@@ -357,7 +493,6 @@ class UltrasonicSensor:
     def ultrasonic_measure(self):
         """Single distance measurement"""
         try:
-            # Send trigger pulse
             lgpio.gpio_write(self.chip, self.trig, 0)
             time.sleep(0.000002)
             
@@ -365,7 +500,6 @@ class UltrasonicSensor:
             time.sleep(0.00001)
             lgpio.gpio_write(self.chip, self.trig, 0)
             
-            # Wait for echo
             timeout = time.time() + 0.1
             pulse_start = time.time()
             while lgpio.gpio_read(self.chip, self.echo) == 0:
@@ -380,7 +514,6 @@ class UltrasonicSensor:
                 if pulse_end > timeout:
                     return None
             
-            # Calculate distance
             pulse_duration = pulse_end - pulse_start
             distance_cm = pulse_duration * 17150
             
@@ -392,7 +525,7 @@ class UltrasonicSensor:
             return None
     
     def start_monitoring(self, audio_controller):
-        """Start ultrasonic monitoring in background thread"""
+        """Start ultrasonic monitoring"""
         self.audio_controller = audio_controller
         self.running = True
         self.thread = threading.Thread(target=self._monitoring_loop)
@@ -401,12 +534,11 @@ class UltrasonicSensor:
         print("✔ Ultrasonic monitoring started")
     
     def _monitoring_loop(self):
-        """Main monitoring loop for ultrasonic sensor"""
+        """Monitoring loop"""
         last_beep_time = 0
         
         while self.running:
             try:
-                # Get distance reading
                 readings = []
                 for _ in range(3):
                     reading = self.ultrasonic_measure()
@@ -419,7 +551,6 @@ class UltrasonicSensor:
                     distance = readings[len(readings)//2]
                     self.current_distance = distance
                     
-                    # Determine zone and beep parameters
                     current_time = time.time()
                     
                     if distance < 10:
@@ -450,7 +581,6 @@ class UltrasonicSensor:
                     else:
                         beep_interval = None
                     
-                    # Add beep to queue if needed
                     if beep_interval is not None and self.audio_controller:
                         if current_time - last_beep_time >= beep_interval:
                             self.audio_controller.add_ultrasonic_alert(
@@ -461,7 +591,7 @@ class UltrasonicSensor:
                 time.sleep(0.05)
                 
             except Exception as e:
-                print(f"Ultrasonic monitoring error: {e}")
+                print(f"Ultrasonic error: {e}")
                 time.sleep(0.1)
     
     def stop_monitoring(self):
@@ -471,13 +601,13 @@ class UltrasonicSensor:
             self.thread.join(timeout=2)
     
     def cleanup(self):
-        """Clean up resources"""
+        """Clean up"""
         self.stop_monitoring()
         if self.chip:
             lgpio.gpiochip_close(self.chip)
 
 class YOLODetector:
-    """YOLO object detection controller"""
+    """YOLO object detection with fixed audio"""
     
     def __init__(self, model_path="yolov8n.pt", camera_type="csi", 
                  frame_width=640, frame_height=480):
@@ -491,18 +621,17 @@ class YOLODetector:
         self.audio_controller = None
         self.latest_frame = None
         self.frame_lock = threading.Lock()
+        self.last_detection_classes = set()
         
-        # Load YOLO model
         print(f"Loading YOLO model from '{model_path}'...")
         try:
             self.model = YOLO(model_path)
-            self.model.conf = 0.5  # Confidence threshold
+            self.model.conf = 0.5
             print("✔ YOLO model loaded successfully")
         except Exception as e:
             print(f"✗ Error loading YOLO model: {e}")
             raise
         
-        # Initialize camera
         self._init_camera()
     
     def _init_camera(self):
@@ -538,7 +667,7 @@ class YOLODetector:
         print("✔ USB camera initialized")
     
     def start_detection(self, audio_controller):
-        """Start object detection in background thread"""
+        """Start object detection"""
         self.audio_controller = audio_controller
         self.running = True
         self.thread = threading.Thread(target=self._detection_loop)
@@ -547,10 +676,11 @@ class YOLODetector:
         print("✔ YOLO detection started")
     
     def _detection_loop(self):
-        """Main detection loop"""
+        """Main detection loop with improved audio"""
+        detection_count = 0
+        
         while self.running:
             try:
-                # Capture frame
                 if self.is_picam:
                     frame = self.cap.capture_array()
                 else:
@@ -559,41 +689,60 @@ class YOLODetector:
                         time.sleep(0.1)
                         continue
                 
-                # Run detection
                 results = self.model(frame, imgsz=self.frame_width, verbose=False)
                 
-                # Store detections
                 self.current_detections = []
+                current_classes = set()
+                
                 if len(results[0].boxes) > 0:
                     for box in results[0].boxes:
                         class_id = int(box.cls)
                         confidence = float(box.conf)
                         class_name = self.model.names[class_id]
+                        
                         self.current_detections.append({
                             'class': class_name,
                             'confidence': confidence
                         })
+                        current_classes.add(class_name)
                     
-                    # Send audio alert for highest confidence detection
-                    if self.current_detections and self.audio_controller:
-                        top_detection = self.current_detections[0]
-                        self.audio_controller.add_yolo_alert(
-                            f"Detected {top_detection['class']}"
-                        )
+                    self.current_detections.sort(key=lambda x: x['confidence'], reverse=True)
+                    
+                    if self.audio_controller:
+                        new_classes = current_classes - self.last_detection_classes
+                        if new_classes:
+                            for detection in self.current_detections:
+                                if detection['class'] in new_classes:
+                                    message = f"{detection['class']} detected"
+                                    self.audio_controller.add_yolo_alert(message)
+                                    break
+                        
+                        elif detection_count % 60 == 0 and self.current_detections:
+                            top = self.current_detections[0]
+                            message = f"{top['class']} still detected"
+                            self.audio_controller.add_yolo_alert(message)
+                    
+                    detection_count += 1
                 
-                # Store annotated frame
+                self.last_detection_classes = current_classes
+                
                 annotated = results[0].plot()
+                
+                cv2.putText(annotated, f"Objects: {len(self.current_detections)}", 
+                          (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 
+                          0.7, (0, 255, 0), 2, cv2.LINE_AA)
+                
                 with self.frame_lock:
                     self.latest_frame = annotated
                 
-                time.sleep(0.033)  # ~30 FPS
+                time.sleep(0.033)
                 
             except Exception as e:
                 print(f"YOLO detection error: {e}")
                 time.sleep(0.1)
     
     def get_latest_frame(self):
-        """Get the latest processed frame"""
+        """Get latest frame"""
         with self.frame_lock:
             return self.latest_frame.copy() if self.latest_frame is not None else None
     
@@ -604,7 +753,7 @@ class YOLODetector:
             self.thread.join(timeout=2)
     
     def cleanup(self):
-        """Clean up resources"""
+        """Clean up"""
         self.stop_detection()
         if self.is_picam:
             self.cap.stop()
@@ -612,7 +761,7 @@ class YOLODetector:
             self.cap.release()
 
 class CombinedSystem:
-    """Main system combining ultrasonic and YOLO"""
+    """Main system combining ultrasonic and YOLO with fixed audio"""
     
     def __init__(self):
         self.audio = AudioController()
@@ -624,38 +773,41 @@ class CombinedSystem:
         """Initialize all components"""
         print("\n" + "="*60)
         print("COMBINED ULTRASONIC & YOLO DETECTION SYSTEM")
-        print("Raspberry Pi 5 Edition")
+        print("Corrected Version")
         print("="*60 + "\n")
         
-        # Initialize ultrasonic sensor
+        self.audio.test_audio_system()
+        
         try:
             self.ultrasonic = UltrasonicSensor(TRIG_PIN, ECHO_PIN)
             self.ultrasonic.start_monitoring(self.audio)
         except Exception as e:
-            print(f"Warning: Ultrasonic sensor initialization failed: {e}")
+            print(f"⚠ Ultrasonic sensor failed: {e}")
             print("Continuing with YOLO only...")
         
-        # Initialize YOLO detector
         try:
             self.yolo = YOLODetector()
             self.yolo.start_detection(self.audio)
         except Exception as e:
-            print(f"Warning: YOLO initialization failed: {e}")
+            print(f"⚠ YOLO failed: {e}")
             if not self.ultrasonic:
-                print("Both systems failed to initialize!")
+                print("Both systems failed!")
                 return False
             print("Continuing with ultrasonic only...")
         
         return True
     
     def run(self):
-        """Main run loop with display"""
+        """Main run loop"""
         if not self.initialize():
             return
         
         print("\n" + "="*60)
         print("SYSTEM RUNNING")
-        print("Press 'q' to quit")
+        print("Controls:")
+        print("  - Press 'q' to quit")
+        print("  - Press 't' to test audio")
+        print("  - Press 'y' to toggle YOLO audio")
         print("="*60 + "\n")
         
         self.running = True
@@ -663,33 +815,30 @@ class CombinedSystem:
         
         try:
             while self.running:
-                # Get current data
                 distance = self.ultrasonic.current_distance if self.ultrasonic else None
                 detections = self.yolo.current_detections if self.yolo else []
                 
-                # Create status display
                 status_lines = []
                 
-                # Ultrasonic status
                 if distance is not None:
                     if distance < 10:
                         zone = "DANGER!"
-                        color = "\033[91m"  # Red
+                        color = "\033[91m"
                     elif distance < 20:
                         zone = "VERY CLOSE"
-                        color = "\033[91m"  # Red
+                        color = "\033[91m"
                     elif distance < 40:
                         zone = "CLOSE"
-                        color = "\033[93m"  # Yellow
+                        color = "\033[93m"
                     elif distance < 70:
                         zone = "MEDIUM"
-                        color = "\033[93m"  # Yellow
+                        color = "\033[93m"
                     elif distance < 100:
                         zone = "FAR"
-                        color = "\033[92m"  # Green
+                        color = "\033[92m"
                     else:
                         zone = "SAFE"
-                        color = "\033[92m"  # Green
+                        color = "\033[92m"
                     
                     bars = int(min(distance / 10, 10))
                     bar_display = color + "█" * bars + "░" * (10 - bars) + "\033[0m"
@@ -697,7 +846,6 @@ class CombinedSystem:
                 else:
                     status_lines.append("Distance: No reading")
                 
-                # YOLO detections
                 if detections:
                     det_str = ", ".join([f"{d['class']}({d['confidence']:.2f})" 
                                         for d in detections[:3]])
@@ -705,19 +853,24 @@ class CombinedSystem:
                 else:
                     status_lines.append("Objects: None detected")
                 
-                # Display status
+                audio_status = "Audio: "
+                if self.audio.audio_method:
+                    audio_status += f"Beep[{self.audio.audio_method}] "
+                if self.audio.tts_method:
+                    audio_status += f"TTS[{self.audio.tts_method}] "
+                if not self.audio.audio_method and not self.audio.tts_method:
+                    audio_status += "None"
+                status_lines.append(audio_status)
+                
                 print("\r" + " | ".join(status_lines) + "     ", end="", flush=True)
                 
-                # Show video if YOLO is running
                 if self.yolo:
                     frame = self.yolo.get_latest_frame()
                     if frame is not None:
-                        # Add FPS counter
                         new_time = time.time()
                         fps = 1 / (new_time - prev_time) if new_time != prev_time else 0
                         prev_time = new_time
                         
-                        # Add distance overlay
                         if distance is not None:
                             cv2.putText(frame, f"Distance: {distance:.1f} cm", 
                                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 
@@ -727,10 +880,22 @@ class CombinedSystem:
                                   (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 
                                   1, (0, 255, 0), 2, cv2.LINE_AA)
                         
+                        yolo_audio_status = f"YOLO Audio: {'ON' if self.audio.yolo_audio_enabled else 'OFF'}"
+                        cv2.putText(frame, yolo_audio_status,
+                                  (10, 120), cv2.FONT_HERSHEY_SIMPLEX,
+                                  0.7, (0, 255, 0) if self.audio.yolo_audio_enabled else (0, 0, 255), 2)
+                        
                         cv2.imshow("Combined Detection System", frame)
                         
-                        if cv2.waitKey(1) & 0xFF == ord('q'):
+                        key = cv2.waitKey(1) & 0xFF
+                        if key == ord('q'):
                             self.running = False
+                        elif key == ord('t'):
+                            print("\n\nTesting audio...")
+                            self.audio.test_audio_system()
+                        elif key == ord('y'):
+                            enabled = self.audio.toggle_yolo_audio()
+                            print(f"\n\nYOLO Audio: {'ENABLED' if enabled else 'DISABLED'}")
                 else:
                     time.sleep(0.1)
                     
@@ -740,7 +905,7 @@ class CombinedSystem:
             self.cleanup()
     
     def cleanup(self):
-        """Clean up all resources"""
+        """Clean up"""
         print("\nCleaning up...")
         
         if self.ultrasonic:
@@ -752,49 +917,54 @@ class CombinedSystem:
         self.audio.cleanup()
         cv2.destroyAllWindows()
         
-        print("✔ Cleanup complete. Goodbye!")
+        print("✔ Cleanup complete!")
 
-def install_dependencies():
-    """Install all required dependencies"""
-    print("\n" + "="*60)
-    print("INSTALLING DEPENDENCIES")
-    print("="*60)
-    
+def install_audio_dependencies():
+    """Install audio dependencies specifically"""
+    print("Installing audio dependencies...")
     commands = [
         "sudo apt update",
-        "sudo apt install -y pulseaudio pulseaudio-utils",
-        "sudo apt install -y bluez pulseaudio-module-bluetooth",
-        "sudo apt install -y sox libsox-fmt-all",
-        "sudo apt install -y alsa-utils",
         "sudo apt install -y espeak",
-        "sudo apt install -y python3-lgpio python3-pip",
-        "sudo apt install -y python3-opencv",
-        "pip3 install numpy lgpio ultralytics opencv-python"
+        "sudo apt install -y festival",
+        "sudo apt install -y libttspico-utils",
+        "sudo apt install -y sox",
+        "sudo apt install -y pulseaudio",
+        "sudo apt install -y alsa-utils"
     ]
     
     for cmd in commands:
-        print(f"\nRunning: {cmd}")
+        print(f"Running: {cmd}")
         os.system(cmd)
     
-    print("\n✔ Dependencies installed!")
+    print("\n✔ Audio dependencies installed!")
+    print("Testing espeak...")
+    os.system("espeak 'Audio test complete'")
 
 def main():
     """Main entry point"""
     
-    # Check for command line arguments
     if len(sys.argv) > 1:
-        if sys.argv[1] == "--install":
-            install_dependencies()
+        if sys.argv[1] == "--install-audio":
+            install_audio_dependencies()
+            return
+        elif sys.argv[1] == "--test-audio":
+            audio = AudioController()
+            audio.test_audio_system()
+            time.sleep(3)
+            audio.cleanup()
             return
         elif sys.argv[1] == "--help":
-            print("Combined Ultrasonic & YOLO Detection System")
+            print("Combined System - Corrected Version")
             print("\nUsage:")
-            print("  python3 combined_system.py           # Run the system")
-            print("  python3 combined_system.py --install # Install dependencies")
-            print("  python3 combined_system.py --help    # Show this help")
+            print("  python3 combined_ultrasonic_yolo_fixed.py         # Run system")
+            print("  python3 combined_ultrasonic_yolo_fixed.py --install-audio  # Install audio")
+            print("  python3 combined_ultrasonic_yolo_fixed.py --test-audio     # Test audio")
+            print("\nRuntime controls:")
+            print("  q - Quit")
+            print("  t - Test audio")
+            print("  y - Toggle YOLO audio on/off")
             return
     
-    # Run the combined system
     system = CombinedSystem()
     system.run()
 

@@ -1,4 +1,4 @@
-# Newnavsight 🧭
+# Navsight 🧭
 
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://python.org)
 [![Raspberry Pi](https://img.shields.io/badge/Platform-Raspberry%20Pi%205-red.svg)](https://raspberrypi.org)

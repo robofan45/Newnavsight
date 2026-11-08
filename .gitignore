@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Model weights and exports are downloaded on the Pi, not committed
+*.pt
+*.onnx
+*_ncnn_model/
+
+# Local settings
+navsight.local.json

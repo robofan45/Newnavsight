@@ -1,0 +1,21 @@
+{
+  "alerts": {
+    "verbosity": "full",
+    "caution_m": 2.0
+  },
+  "imu": {
+    "forward_axis": "y",
+    "heading_offset_deg": 0.0
+  },
+  "sos": {
+    "webhook_url": null,
+    "telegram_bot_token": null,
+    "telegram_chat_id": null
+  },
+  "detector": {
+    "model_path": "yolov8n_ncnn_model"
+  },
+  "depth": {
+    "enabled": false
+  }
+}

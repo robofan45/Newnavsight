@@ -1,0 +1,24 @@
+# Start NavSight when the Pi boots.
+# Install: sudo cp systemd/navsight.service /etc/systemd/system/
+#          sudo systemctl daemon-reload && sudo systemctl enable --now navsight
+# Logs:    journalctl -u navsight -f
+# Edit User and the paths if your username or checkout location differ.
+
+[Unit]
+Description=NavSight v2 smart cane
+After=sound.target bluetooth.target
+Wants=sound.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+SupplementaryGroups=gpio i2c dialout audio video
+WorkingDirectory=/home/pi/Newnavsight
+ExecStart=/home/pi/Newnavsight/.venv/bin/python -m navsight --config /home/pi/navsight.json
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

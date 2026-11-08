@@ -1,0 +1,5 @@
+# For running the tests and the simulator on any PC.
+numpy>=1.24
+pyserial>=3.5
+pytest>=8
+ruff>=0.5

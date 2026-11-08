@@ -1,0 +1,1 @@
+"""Battery-aware power management."""
